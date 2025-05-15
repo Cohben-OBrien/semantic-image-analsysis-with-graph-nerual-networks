@@ -12,9 +12,11 @@ class RepresentationLearner(keras.Model):
             temperature=1.0,
             dropout_rate=0.1,
             l2_normalize=False,
+            num_features=2048,
             **kwargs
     ):
         super().__init__(**kwargs)
+        self.num_features = num_features
         self.encoder = encoder
         # Create projection head.
         self.projector = keras.Sequential(
