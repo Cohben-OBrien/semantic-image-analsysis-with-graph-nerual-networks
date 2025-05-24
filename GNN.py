@@ -1,3 +1,5 @@
+from multiprocessing.util import sub_warning
+
 import keras
 from keras import layers
 import tensorflow as tf
@@ -33,145 +35,106 @@ def create_gru(hidden_units, dropout_rate):
 
     return keras.Model(inputs=inputs, outputs=x)
 
-class GraphConvLayer(layers.Layer):
-    def __init__(self,
-                 hidden_units,
-                 dropout_rate=0.2,
-                 aggregation='mean',
-                 combination_type='concat',
-                 normalization=False,
-                 *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
-        self.aggregation = aggregation
-        self.combination_type = combination_type
-        self.normalization = normalization
+class GraphConvolution(layers.Layer):
+    def __init__(self, output_dim, **kwargs):
+        super().__init__(**kwargs)
 
-        self.ffn_prepare = ffn(hidden_units, dropout_rate)
-        if self.combination_type == 'gru':
-            self.update_fn = create_gru(hidden_units, dropout_rate)
-        else:
-            self.update_fn = ffn(hidden_units, dropout_rate)
+        self.output_dim = output_dim
 
-
-    def prepare(self, node_representation, weights=None):
-        messages = self.ffn_prepare(node_representation)
-
-        if weights is not None:
-            messages = messages * tf.expand_dims(weights, axis=-1)
-        return messages
-
-    def aggregate(self, node_indices, neighbour_messages, node_representation):
-        num_nodes = node_representation.shape[0]
-        print(self.aggregation)
-        if self.aggregation == "sum":
-            aggregated_messages = tf.math.unsorted_segment_sum(
-                neighbour_messages, node_indices, num_segments=num_nodes
-            )
-        elif self.aggregation == "mean":
-            aggregated_messages = tf.math.unsorted_segment_mean(
-                neighbour_messages, node_indices, num_segments=num_nodes
-            )
-        elif self.aggregation == "max":
-            aggregated_messages = tf.math.unsorted_segment_max(
-                neighbour_messages, node_indices, num_segments=num_nodes
-            )
-        else: raise ValueError(f'Unknown aggregation type: {self.aggregation}')
-
-        return aggregated_messages
-
-    def update(self, node_repesemtation, aggregated_messages):
-
-        if self.combination_type == 'gru':
-            #create a sequence of two elements for the GRU layer
-            h = tf.stack([node_repesemtation, aggregated_messages], axis=1)
-        elif self.combination_type == 'concat':
-            h = tf.concat([node_repesemtation, aggregated_messages], axis=1)
-        elif self.combination_type == 'add':
-            h = node_repesemtation + aggregated_messages
-        else:
-            raise ValueError(f'Unknown combination type: {self.combination_type}')
-
-        node_embeding = self.update_fn(h)
-        if self.combination_type == 'gru':
-            node_embeding = tf.unstack(node_embeding, axis=1)[-1]
-
-        if self.normalization:
-            node_embeding = tf.nn.l2_normalize(node_embeding, axis=1)
-        return node_embeding
-
+    def build(self, input_shape):
+        self.kernel = self.add_weight(name='kernel',
+                                     shape=(input_shape[0][-1], self.output_dim),
+                                     initializer='glorot_uniform',
+                                     trainable=True)
     def call(self, inputs):
-        node_repesentation, edges, edge_weights = inputs
-
-        node_indices, neighbors_indices = edges[0], edges[1]
-
-        neighbour_representation = tf.gather(node_repesentation, neighbors_indices)
-
-        neighbour_massages = self.prepare(neighbour_representation, edge_weights)
-
-        aggregated_messages = self.aggregate(
-            node_indices, neighbour_massages, node_repesentation
-        )
-
-        return self.update(node_repesentation, aggregated_messages)
+        features, adjacency = inputs
+        output = tf.matmul(adjacency, features)
+        output = tf.matmul(output, self.kernel)
+        return output
 
 
 
-#%%
-class GNNNodeClassification(tf.keras.Model):
+def create_gnn_encoder(feature_dim, num_nodes, num_classes,):
+    feature_input = keras.Input(shape=(feature_dim,))
+    adjacency_input = keras.Input(shape=(num_nodes,))
+
+    x = GraphConvolution(64)([feature_input, adjacency_input])
+    x = layers.ReLU()(x)
+    x = GraphConvolution(32)([x, adjacency_input])
+    x = layers.ReLU()(x)
+
+    output = layers.Dense(num_classes, activation='softmax')(x)
+
+    encoder = keras.Model(inputs=[feature_input, adjacency_input], outputs=output)
+
+    return encoder
+
+
+
+def create_projector(projection_dim=64, out_dim=64):
+    return keras.Sequential([
+        layers.Dense(out_dim, activation='relu'),
+        layers.Dense(out_dim),
+    ], name='projection')
+
+
+class SimSiamGNN(keras.Model):
+    def __init__(self, encoder, projector):
+        super().__init__()
+        self.encoder = encoder
+        self.projector = projector
+        self.loss_tracker = keras.metrics.Mean(name='loss')
+
+    @staticmethod
+    def negative_cosine_similarity(A, B):
+        a = tf.math.l2_normalize(A, axis=-1)
+        b = tf.math.l2_normalize(B, axis=-1)
+        return -tf.reduce_mean(tf.reduce_sum(a * b, axis=-1))
+
+    def train_step(self, data):
+        (features1, adj1), (features2, adj2) = data
+
+        with tf.GradientTape() as tape:
+            z1 = self.encoder([features1, adj1])
+            z2 = self.encoder([features2, adj2])
+
+            p1 = self.projector(z1)
+            p2 = self.projector(z2)
+
+            loss = (self.negative_cosine_similarity(p1, tf.stop_gradient(z2)) +
+                    self.negative_cosine_similarity(p2, tf.stop_gradient(z1)) *
+                    0.5)
+
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        self.loss_tracker.update_state(loss)
+        return {'loss': self.loss_tracker.result()}
+
+    @property
+    def metrics(self):
+        return [self.loss_tracker]
+
+
+class GraphDataGenerator(keras.utils.Sequence):
     def __init__(self,
-                 graph_info,
-                 num_classes,
-                 hidden_units,
-                 aggregation_type="mean",
-                 combination_type='concat',
-                 dropout_rate=0.2,
-                 normalize=True,
-                 *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        node_features, edges, edge_weights = graph_info
-
-        self.node_features = node_features
-        self.edges = edges
-        self.edge_weights = edge_weights
-
-        self.preprocess = ffn(hidden_units, dropout_rate, name=f'preprocess')
-
-        if self.edge_weights is None:
-            self.edge_weights = tf.ones(shape=edges.shape[1])
-
-        self.edge_weights / tf.math.reduce_sum(self.edge_weights)
+                 features,
+                 adjacency,
+                 batch_size=1,
+                 augmented_fn=None):
+        self.features = features
+        self.adjacency = adjacency
+        self.batch_size = batch_size
+        self.augmented_fn = augmented_fn
 
 
-        self.conv1 = GraphConvLayer(hidden_units, dropout_rate,
-                                    aggregation=aggregation_type,
-                                    combination_type=combination_type,
-                                    normalization=normalize,
-                                    name='graph_conv1')
+    def __len__(self):
+        return len(self.features) // self.batch_size
 
-        self.conv2 = GraphConvLayer(hidden_units, dropout_rate,
-                                    aggregation=aggregation_type,
-                                    combination_type=combination_type,
-                                    normalization=normalize,
-                                    name='graph_conv2')
-        self.postprocess = ffn(hidden_units, dropout_rate, name=f'postprocess')
-        self.compute_logits = layers.Dense(num_classes, name='logits')
+    def __getitem__(self, idx):
+        feat1, adj1 = self.augmented_fn(self.features, self.adjacency)
+        feat2, adj2 = self.augmented_fn(self.features, self.adjacency)
 
+        return ([feat1, adj1], [feat2, adj2])
 
-
-    def call(self, input_node_indices):
-        x = self.preprocess(self.node_features)
-        x1 = self.conv1((x, self.edges, self.edge_weights))
-        x = x + x1
-
-        x2 = self.conv2((x, self.edges, self.edge_weights))
-        x = x + x2
-
-        x = self.postprocess(x)
-
-        print(input_node_indices)
-        node_embedding = tf.gather(x, input_node_indices)
-
-        return self.compute_logits(node_embedding)
 
