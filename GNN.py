@@ -1,140 +1,185 @@
-from multiprocessing.util import sub_warning
-
+import pandas as pd
+import numpy as np
 import keras
 from keras import layers
 import tensorflow as tf
-from networkx.classes import neighbors
 
-def ffn(hidden_units, dropout_rate, name=None):
-    fnn_layers = []
-
-    for units in hidden_units:
-        fnn_layers.append(layers.BatchNormalization())
-        fnn_layers.append(layers.Dropout(dropout_rate))
-        fnn_layers.append(layers.Dense(units, activation ='gelu'))
-
-    return keras.Sequential(fnn_layers,
-                            name=name)
-
-def create_gru(hidden_units, dropout_rate):
-    inputs = keras.layers.Input(shape=(2, hidden_units[0]))
-    x = inputs
-
-
-    for units in hidden_units:
-        x = layers.GRU(
-            units=units,
-            activation='tanh',
-            recurrent_activation='sigmoid',
-            return_sequences=True,
-            dropout=dropout_rate,
-            return_state=False,
-            recurrent_dropout=dropout_rate,
-
-        )(x)
-
-    return keras.Model(inputs=inputs, outputs=x)
-
-
-class GraphConvolution(layers.Layer):
-    def __init__(self, output_dim, **kwargs):
+class GraphAttention(layers.Layer):
+    def __init__(
+            self,
+            units,
+            kernel_initializer="glorot_uniform",
+            kernel_regularizer=None,
+            **kwargs,
+    ):
         super().__init__(**kwargs)
-
-        self.output_dim = output_dim
+        self.units = units
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
     def build(self, input_shape):
-        self.kernel = self.add_weight(name='kernel',
-                                     shape=(input_shape[0][-1], self.output_dim),
-                                     initializer='glorot_uniform',
-                                     trainable=True)
+
+        self.kernel = self.add_weight(
+            shape=(input_shape[0][-1], self.units),
+            trainable=True,
+            initializer=self.kernel_initializer,
+            regularizer=self.kernel_regularizer,
+            name="kernel",
+        )
+        self.kernel_attention = self.add_weight(
+            shape=(self.units * 2, 1),
+            trainable=True,
+            initializer=self.kernel_initializer,
+            regularizer=self.kernel_regularizer,
+            name="kernel_attention",
+        )
+        self.built = True
+
     def call(self, inputs):
-        features, adjacency = inputs
-        output = tf.matmul(adjacency, features)
-        output = tf.matmul(output, self.kernel)
+
+
+        # node states = feature vectors - edges = edge listy
+        node_states, edges = inputs
+
+        # Linearly transform node states
+        # node_states (feature vector) * kernal
+        node_states_transformed = tf.matmul(node_states, self.kernel)
+
+        # (1) Compute pair-wise attention scores
+        # match traformed node states with edges
+        node_states_expanded = tf.gather(node_states_transformed, edges)
+
+        # Concatenate the transformed node states of source and target nodes
+        node_states_expanded = tf.reshape(
+            node_states_expanded, (tf.shape(edges)[0], -1)
+        )
+
+        # Compute attention scores by applying a linear transformation followed by a leaky ReLU activation
+        attention_scores = tf.nn.leaky_relu(
+            tf.matmul(node_states_expanded, self.kernel_attention)
+        )
+
+        # Reshape to remove the last dimension
+        attention_scores = tf.squeeze(attention_scores, -1)
+
+        # (2) Normalize attention scores
+        # Clip the attention scores to avoid overflow in exp
+        attention_scores = tf.math.exp(tf.clip_by_value(attention_scores, -2, 2))
+
+        # Sum attention scores for each source node
+        attention_scores_sum = tf.math.unsorted_segment_sum(
+            data=attention_scores,
+            segment_ids=edges[:, 0],
+            num_segments=tf.reduce_max(edges[:, 0]) + 1,
+        )
+
+        # Normalize attention scores by dividing by the sum of attention scores for each source node
+        segment_ids = tf.cast(edges[:, 0], tf.int32)
+        # Expand attention_scores_sum to match the shape of attention_scores
+        expanded_attention_scores_sum = tf.gather(attention_scores_sum, segment_ids)
+        # Avoid division by zero
+        attention_scores_norm = attention_scores / expanded_attention_scores_sum
+
+
+        # (3) Gather node states of neighbors, apply attention scores and aggregate
+        # Gather the transformed node states of neighbors using the edges
+        node_states_neighbors = tf.gather(node_states_transformed, edges[:, 1])
+        # Multiply the gathered node states by the normalized attention scores
+        out = tf.math.unsorted_segment_sum(
+            data=node_states_neighbors * attention_scores_norm[:, tf.newaxis],
+            segment_ids=edges[:, 0],
+            num_segments=tf.shape(node_states)[0],
+        ) # output shape: (num_nodes, units)
+
+
+        return out
+
+
+
+#%%
+class MultiHeadGraphAttention(layers.Layer):
+    def __init__(
+            self,
+            units,
+            num_heads,
+            merge_type='concat',
+            **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.merge_type = merge_type
+        self.attention_layers = [GraphAttention(units) for _ in range(num_heads)]
+
+    def call(self, inputs):
+        features, indices = inputs # features: node states, indices: edges
+        outputs = [
+            attention_layer([features, indices]) for attention_layer in self.attention_layers
+        ] # outputs is a list of tensors, each with shape (num_nodes, units)
+
+        # Merge the outputs of the attention heads
+
+        if self.merge_type == 'concat':
+            outputs = tf.concat(outputs, axis=-1)
+        else:
+            outputs = tf.reduce_mean(tf.stack(outputs, axis=-1), axis=-1)
+
+        return tf.nn.relu(outputs) #return the merged outputs with ReLU activation
+
+
+class GraphAttentionNetwork(keras.Model):
+    def __init__(
+            self,
+            node_states,
+            edges,
+            hidden_units,
+            num_heads,
+            num_layers,
+            output_dim,
+            **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.node_states = node_states
+        self.edges = edges
+        self.preprocess = layers.Dense(hidden_units * num_heads, activation='relu') # preprocess the node states before passing to attention layers
+        self.attention_layers = [
+            MultiHeadGraphAttention(hidden_units, num_heads) for _ in range(num_layers) # create multiple attention layers creating multiple heads
+        ]
+        self.output_layer = layers.Dense(output_dim)  # output layer to produce final output as shape (num_nodes, output_dim)
+
+    def call(self, inputs):
+        print(inputs)
+        node_states, edges = inputs # node_states: feature vectors, edges: edge list as a tensor of shape (num_edges, 2)
+        x = self.preprocess(node_states) # x shape: (num_nodes, hidden_units * num_heads
+        for attention_layer in self.attention_layers:
+            x = attention_layer([x, edges]) + x # residual connection
+        output = self.output_layer(x) # output shape: (num_nodes, output_dim)
         return output
 
-
-
-def create_gnn_encoder(feature_dim, num_nodes, num_classes,):
-    feature_input = keras.Input(shape=(feature_dim,))
-    adjacency_input = keras.Input(shape=(num_nodes,))
-
-    x = GraphConvolution(64)([feature_input, adjacency_input])
-    x = layers.ReLU()(x)
-    x = GraphConvolution(32)([x, adjacency_input])
-    x = layers.ReLU()(x)
-
-    output = layers.Dense(num_classes, activation='softmax')(x)
-
-    encoder = keras.Model(inputs=[feature_input, adjacency_input], outputs=output)
-
-    return encoder
-
-
-
-def create_projector(projection_dim=64, out_dim=64):
-    return keras.Sequential([
-        layers.Dense(out_dim, activation='relu'),
-        layers.Dense(out_dim),
-    ], name='projection')
-
-
-class SimSiamGNN(keras.Model):
-    def __init__(self, encoder, projector):
-        super().__init__()
-        self.encoder = encoder
-        self.projector = projector
-        self.loss_tracker = keras.metrics.Mean(name='loss')
-
-    @staticmethod
-    def negative_cosine_similarity(A, B):
-        a = tf.math.l2_normalize(A, axis=-1)
-        b = tf.math.l2_normalize(B, axis=-1)
-        return -tf.reduce_mean(tf.reduce_sum(a * b, axis=-1))
-
     def train_step(self, data):
-        (features1, adj1), (features2, adj2) = data
+        indices, labels = data # geting indices and labels from the data defined in the fit method as x=edges, y=labels
 
-        with tf.GradientTape() as tape:
-            z1 = self.encoder([features1, adj1])
-            z2 = self.encoder([features2, adj2])
+        with tf.GradientTape() as tape: # record the gradients for backpropagation
+            outputs = self([self.node_states, self.edges]) # forward pass through the model
+            loss = self.compiled_loss(labels, tf.gather(outputs, indices)) # compute the loss using the gathered outputs and labels
 
-            p1 = self.projector(z1)
-            p2 = self.projector(z2)
+        grads = tape.gradient(loss, self.trainable_weights) # compute the gradients of the loss with respect to the trainable weights
+        self.optimizer.apply_gradients(zip(grads, self.trainable_weights)) # apply the gradients to the trainable weights
+        self.compiled_metrics.update_state(labels, tf.gather(outputs, indices)) # update the metrics using the gathered outputs and labels
 
-            loss = (self.negative_cosine_similarity(p1, tf.stop_gradient(z2)) +
-                    self.negative_cosine_similarity(p2, tf.stop_gradient(z1)) *
-                    0.5)
+        return {m.name: m.result() for m in self.metrics} # return the metrics as a dictionary with metric names as keys and their values as values
 
-        grads = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
-        self.loss_tracker.update_state(loss)
-        return {'loss': self.loss_tracker.result()}
+    def predict_step(self, data):
+        indices, labels = data
+        output = self([self.node_states, self.edges]) # forward pass through the model
+        probs = tf.nn.softmax(output, axis=-1) # apply softmax to the output to get probabilities
+        return tf.gather(probs, indices) # gather the probabilities using the indices from the data
 
-    @property
-    def metrics(self):
-        return [self.loss_tracker]
+    def test_step(self, data):
+        indices, labels = data
+        outputs = self([self.node_states, self.edges])
+        loss = self.compiled_loss(labels, tf.gather(outputs, indices))
 
+        self.compiled_metrics.update_state(labels, tf.gather(outputs, indices))
 
-class GraphDataGenerator(keras.utils.Sequence):
-    def __init__(self,
-                 features,
-                 adjacency,
-                 batch_size=1,
-                 augmented_fn=None):
-        self.features = features
-        self.adjacency = adjacency
-        self.batch_size = batch_size
-        self.augmented_fn = augmented_fn
-
-
-    def __len__(self):
-        return len(self.features) // self.batch_size
-
-    def __getitem__(self, idx):
-        feat1, adj1 = self.augmented_fn(self.features, self.adjacency)
-        feat2, adj2 = self.augmented_fn(self.features, self.adjacency)
-
-        return ([feat1, adj1], [feat2, adj2])
-
+        return {m.name: m.result() for m in self.metrics}
 
