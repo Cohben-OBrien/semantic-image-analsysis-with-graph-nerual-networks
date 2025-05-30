@@ -41,6 +41,11 @@ class GraphAttention(layers.Layer):
         # node states = feature vectors - edges = edge listy
         node_states, edges = inputs
 
+        edges = tf.cast(edges, tf.int32)
+
+        num_nodes = tf.shape(node_states)[0]
+
+
         # Linearly transform node states
         # node_states (feature vector) * kernal
         node_states_transformed = tf.matmul(node_states, self.kernel)
@@ -67,14 +72,16 @@ class GraphAttention(layers.Layer):
         attention_scores = tf.math.exp(tf.clip_by_value(attention_scores, -2, 2))
 
         # Sum attention scores for each source node
-        attention_scores_sum = tf.math.unsorted_segment_sum(
-            data=attention_scores,
-            segment_ids=edges[:, 0],
-            num_segments=tf.reduce_max(edges[:, 0]) + 1,
-        )
 
         # Normalize attention scores by dividing by the sum of attention scores for each source node
-        segment_ids = tf.cast(edges[:, 0], tf.int32)
+        segment_ids = tf.clip_by_value(edges[:, 0], 0, num_nodes - 1)
+
+        attention_scores_sum = tf.math.unsorted_segment_sum(
+            data=attention_scores,
+            segment_ids=segment_ids,
+            num_segments=num_nodes,
+        )
+
         # Expand attention_scores_sum to match the shape of attention_scores
         expanded_attention_scores_sum = tf.gather(attention_scores_sum, segment_ids)
         # Avoid division by zero
@@ -87,8 +94,8 @@ class GraphAttention(layers.Layer):
         # Multiply the gathered node states by the normalized attention scores
         out = tf.math.unsorted_segment_sum(
             data=node_states_neighbors * attention_scores_norm[:, tf.newaxis],
-            segment_ids=edges[:, 0],
-            num_segments=tf.shape(node_states)[0],
+            segment_ids=segment_ids,
+            num_segments=num_nodes,
         ) # output shape: (num_nodes, units)
 
 
@@ -149,10 +156,16 @@ class GraphAttentionNetwork(keras.Model):
     def call(self, inputs):
         print(inputs)
         node_states, edges = inputs # node_states: feature vectors, edges: edge list as a tensor of shape (num_edges, 2)
+
         x = self.preprocess(node_states) # x shape: (num_nodes, hidden_units * num_heads
         for attention_layer in self.attention_layers:
-            x = attention_layer([x, edges]) + x # residual connection
+            attention_output = attention_layer([x, edges])
+            x = attention_output + x  # residual connection, adding the output of attention layer to the input
+
+
         output = self.output_layer(x) # output shape: (num_nodes, output_dim)
+
+        # output = tf.concat([output, tf.reduce_mean(x, axis=-1, keepdims=True)], axis=-1)
         return output
 
     def train_step(self, data):
@@ -160,11 +173,14 @@ class GraphAttentionNetwork(keras.Model):
 
         with tf.GradientTape() as tape: # record the gradients for backpropagation
             outputs = self([self.node_states, self.edges]) # forward pass through the model
-            loss = self.compiled_loss(labels, tf.gather(outputs, indices)) # compute the loss using the gathered outputs and labels
+
+            outputs = tf.gather(outputs, tf.squeeze(indices))
+
+            loss = self.compiled_loss(labels, outputs) # compute the loss using the gathered outputs and labels
 
         grads = tape.gradient(loss, self.trainable_weights) # compute the gradients of the loss with respect to the trainable weights
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights)) # apply the gradients to the trainable weights
-        self.compiled_metrics.update_state(labels, tf.gather(outputs, indices)) # update the metrics using the gathered outputs and labels
+        self.compiled_metrics.update_state(labels, outputs) # update the metrics using the gathered outputs and labels
 
         return {m.name: m.result() for m in self.metrics} # return the metrics as a dictionary with metric names as keys and their values as values
 
