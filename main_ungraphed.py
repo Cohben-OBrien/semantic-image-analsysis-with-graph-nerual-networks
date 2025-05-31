@@ -21,6 +21,9 @@ import matplotlib.pyplot as plt
 #%%
 
 
+strategy = tf.distribute.MirroredStrategy()
+print(f'Number of devices: {strategy.num_replicas_in_sync}')
+
 num_classes = 10
 input_shape = (32, 32, 3)
 
@@ -57,7 +60,6 @@ encoder = create_encoder(
     representation_dims
 )
 #%%
-representation_learner = RepresentationLearner(encoder, projection_units, num_augmentations=4)
 
 
 lr_scheduler = keras.optimizers.schedules.CosineDecay(
@@ -66,11 +68,12 @@ lr_scheduler = keras.optimizers.schedules.CosineDecay(
     alpha=0.1
 )
 optimizer = keras.optimizers.AdamW(learning_rate=lr_scheduler, weight_decay=0.0001)
-
-representation_learner.compile(
-    optimizer=optimizer,
-    jit_compile=False,
-)
+with strategy.scope():
+    representation_learner = RepresentationLearner(encoder, projection_units, num_augmentations=4)
+    representation_learner.compile(
+        optimizer=optimizer,
+        jit_compile=False,
+    )
 
 history = representation_learner.fit(
     x=x_data,
@@ -91,19 +94,23 @@ knns = compute_knn(feature_vectors, batch_size=batch_size, kn=kn)
 for layer in encoder.layers:
     layer.trainable = tune_encoder_during_clustering
 
-clustering_model = create_clustering_model(encoder, num_clusters, input_shape, name='clustering')
-clustering_learner = create_clustering_learner(clustering_model, input_shape)
+
 
 losses = [ClustersEntropyLoss(), ClustersEntropyLoss(entropy_loss_weight=5)]
 
 inputs = {"anchor": x_data, 'neighbours': tf.gather(x_data, knns)}
 labels = [np.ones(shape=(x_data.shape[0], kn)), np.ones(shape=(x_data.shape[0], kn))]
 
-clustering_learner.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=0.0005, weight_decay=0.0001),
-    loss=losses,
-    jit_compile=False,
-)
+
+with strategy.scope():
+    clustering_model = create_clustering_model(encoder, num_clusters, input_shape, name='clustering')
+    clustering_learner = create_clustering_learner(clustering_model, input_shape)
+
+    clustering_learner.compile(
+        optimizer=keras.optimizers.AdamW(learning_rate=0.0005, weight_decay=0.0001),
+        loss=losses,
+        jit_compile=False,
+    )
 
 clustering_learner.fit(
     x=inputs,
@@ -194,20 +201,22 @@ early_stopping = keras.callbacks.EarlyStopping(
 feature_vectors = tf.convert_to_tensor(feature_vectors, dtype=tf.float32)
 edge_list = tf.convert_to_tensor(edge_list, dtype=tf.int32)
 #%%
-model = GraphAttentionNetwork(
-    node_states=feature_vectors,
-    edges=edge_list,
-    hidden_units=hidden_units,
-    num_heads=num_heads,
-    num_layers=num_layers,
-    output_dim=output_dim,
-)
+
+with strategy.scope():
+    model = GraphAttentionNetwork(
+        node_states=feature_vectors,
+        edges=edge_list,
+        hidden_units=hidden_units,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        output_dim=output_dim,
+    )
 #%%
-model.compile(
-    loss=loss_fn,
-    optimizer=optimizer,
-    metrics=[accuracy],
-)
+    model.compile(
+        loss=loss_fn,
+        optimizer=optimizer,
+        metrics=[accuracy],
+    )
 #%%
 train_indices = np.arange(len(y_data))
 train_labels = y_data.flatten().astype(np.int32)
