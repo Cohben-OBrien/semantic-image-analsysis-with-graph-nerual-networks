@@ -59,22 +59,21 @@ processer.layers[-1].adapt(x_data)
 strategy = tf.distribute.MirroredStrategy()
 print(f'Number of devices: {strategy.num_replicas_in_sync}')
 
-with strategy.scope():
-    encoder = create_encoder(representation_dims)
+encoder = create_encoder(representation_dims)
     
-    representation_learner = RepresentationLearner(encoder, projection_units, num_augmentations=4)
+representation_learner = RepresentationLearner(encoder, projection_units, num_augmentations=4)
     
-    lr_scheduler = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=0.001,
-        decay_steps=500,
-        alpha=0.1
-    )
-    optimizer = keras.optimizers.AdamW(learning_rate=lr_scheduler, weight_decay=0.0001)
-    
-    representation_learner.compile(
-        optimizer=optimizer,
-        jit_compile=False,
-    )
+lr_scheduler = keras.optimizers.schedules.CosineDecay(
+    initial_learning_rate=0.001,
+    decay_steps=500,
+    alpha=0.1
+)
+optimizer = keras.optimizers.AdamW(learning_rate=lr_scheduler, weight_decay=0.0001)
+
+representation_learner.compile(
+    optimizer=optimizer,
+    jit_compile=False,
+)
 
 history = representation_learner.fit(
     x=x_data,
@@ -103,15 +102,15 @@ inputs = {"anchor": x_data, 'neighbours': tf.gather(x_data, knns)}
 labels = [np.ones(shape=(x_data.shape[0], kn)), np.ones(shape=(x_data.shape[0], kn))]
 
 
-with strategy.scope():
-    clustering_model = create_clustering_model(encoder, num_clusters, input_shape, name='clustering')
-    clustering_learner = create_clustering_learner(clustering_model, input_shape)
 
-    clustering_learner.compile(
-        optimizer=keras.optimizers.AdamW(learning_rate=0.0005, weight_decay=0.0001),
-        loss=losses,
-        jit_compile=False,
-    )
+clustering_model = create_clustering_model(encoder, num_clusters, input_shape, name='clustering')
+clustering_learner = create_clustering_learner(clustering_model, input_shape)
+
+clustering_learner.compile(
+    optimizer=keras.optimizers.AdamW(learning_rate=0.0005, weight_decay=0.0001),
+    loss=losses,
+    jit_compile=False,
+)
 
 clustering_learner.fit(
     x=inputs,
