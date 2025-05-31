@@ -56,20 +56,21 @@ tune_encoder_during_clustering = False
 x_data = x_data.astype('float32')
 processer.layers[-1].adapt(x_data)
 #%%
-encoder = create_encoder(
-    representation_dims
-)
-#%%
+strategy = tf.distribute.MirroredStrategy()
+print(f'Number of devices: {strategy.num_replicas_in_sync}')
 
-
-lr_scheduler = keras.optimizers.schedules.CosineDecay(
-    initial_learning_rate=0.001,
-    decay_steps=500,
-    alpha=0.1
-)
-optimizer = keras.optimizers.AdamW(learning_rate=lr_scheduler, weight_decay=0.0001)
 with strategy.scope():
+    encoder = create_encoder(representation_dims)
+    
     representation_learner = RepresentationLearner(encoder, projection_units, num_augmentations=4)
+    
+    lr_scheduler = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=0.001,
+        decay_steps=500,
+        alpha=0.1
+    )
+    optimizer = keras.optimizers.AdamW(learning_rate=lr_scheduler, weight_decay=0.0001)
+    
     representation_learner.compile(
         optimizer=optimizer,
         jit_compile=False,
@@ -125,7 +126,7 @@ clustering_probabilitiys = clustering_model.predict(x_data, batch_size=batch_siz
 cluster_assigment = keras.ops.argmax(clustering_probabilitiys, axis=-1).numpy()
 
 cluster_confidence = keras.ops.max(clustering_probabilitiys, axis=-1).numpy()
-#%%
+#%
 from collections import defaultdict
 
 clusters = defaultdict(list)
@@ -187,22 +188,22 @@ validation_split = 0.1
 learning_rate = 3e-1
 momentum = 0.9
 #%%
-loss_fn = keras.losses.CategoricalCrossentropy(from_logits=True)
-optimizer = keras.optimizers.SGD(learning_rate, momentum=momentum)
-accuracy = keras.metrics.CategoricalAccuracy()
-early_stopping = keras.callbacks.EarlyStopping(
-    monitor='val_accuracy',
-    min_delta=1e-3,
-    patience=5,
-    restore_best_weights=True
-)
-
-#%%
-feature_vectors = tf.convert_to_tensor(feature_vectors, dtype=tf.float32)
-edge_list = tf.convert_to_tensor(edge_list, dtype=tf.int32)
 #%%
 
 with strategy.scope():
+    loss_fn = keras.losses.CategoricalCrossentropy(from_logits=True)
+    optimizer = keras.optimizers.SGD(learning_rate, momentum=momentum)
+    accuracy = keras.metrics.CategoricalAccuracy()
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor='val_accuracy',
+        min_delta=1e-3,
+        patience=5,
+        restore_best_weights=True
+    )
+
+    # %%
+    feature_vectors = tf.convert_to_tensor(feature_vectors, dtype=tf.float32)
+    edge_list = tf.convert_to_tensor(edge_list, dtype=tf.int32)
     model = GraphAttentionNetwork(
         node_states=feature_vectors,
         edges=edge_list,
