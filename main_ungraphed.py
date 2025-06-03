@@ -186,47 +186,51 @@ batch_size = 256
 validation_split = 0.1
 learning_rate = 3e-1
 momentum = 0.9
-#%%
-#%%
 
-loss_fn = keras.losses.CategoricalCrossentropy(from_logits=True)
-optimizer = keras.optimizers.SGD(learning_rate, momentum=momentum)
-accuracy = keras.metrics.CategoricalAccuracy()
-early_stopping = keras.callbacks.EarlyStopping(
-    monitor='val_accuracy',
-    min_delta=1e-3,
-    patience=5,
-    restore_best_weights=True
-)
+
+
+#%%
+#%%
+with strategy.scope():
+
+    loss_fn = keras.losses.CategoricalCrossentropy(from_logits=True)
+    optimizer = keras.optimizers.SGD(learning_rate, momentum=momentum)
+    accuracy = keras.metrics.CategoricalAccuracy()
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor='val_accuracy',
+        min_delta=1e-3,
+        patience=5,
+        restore_best_weights=True
+    )
 
     # %%
-feature_vectors = tf.convert_to_tensor(feature_vectors, dtype=tf.float32)
-edge_list = tf.convert_to_tensor(edge_list, dtype=tf.int32)
-model = GraphAttentionNetwork(
-    node_states=feature_vectors,
-    edges=edge_list,
-    hidden_units=hidden_units,
-    num_heads=num_heads,
-    num_layers=num_layers,
-    output_dim=output_dim,
-)
+    feature_vectors = tf.convert_to_tensor(feature_vectors, dtype=tf.float32)
+    edge_list = tf.convert_to_tensor(edge_list, dtype=tf.int32)
+    model = GraphAttentionNetwork(
+        node_states=feature_vectors,
+        edges=edge_list,
+        hidden_units=hidden_units,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        output_dim=output_dim,
+    )
 #%%
-model.compile(
-    loss=loss_fn,
-    optimizer=optimizer,
-    metrics=[accuracy],
-)
+    model.compile(
+        loss=loss_fn,
+        optimizer=optimizer,
+        metrics=[accuracy],
+    )
 #%%
-train_indices = np.arange(len(y_data))
-train_labels = y_data.flatten().astype(np.int32)
+    train_indices = np.arange(len(y_data))
+    train_labels = y_data.flatten().astype(np.int32)
 #%%
-train_labels = keras.utils.to_categorical(train_labels, num_classes=num_classes)
+    train_labels = keras.utils.to_categorical(train_labels, num_classes=num_classes)
 #%%
-train_indices = np.array(train_indices)
-train_labels = np.array(train_labels)
+    train_indices = np.array(train_indices)
+    train_labels = np.array(train_labels)
 #%%
-train_indices = tf.convert_to_tensor(train_indices, dtype=tf.int32)
-train_labels = tf.convert_to_tensor(train_labels, dtype=tf.float32)
+    train_indices = tf.convert_to_tensor(train_indices, dtype=tf.int32)
+    train_labels = tf.convert_to_tensor(train_labels, dtype=tf.float32)
 #%%
 
 model.fit(
