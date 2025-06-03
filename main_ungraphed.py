@@ -198,8 +198,8 @@ with strategy.scope():
     accuracy = keras.metrics.CategoricalAccuracy()
     early_stopping = keras.callbacks.EarlyStopping(
         monitor='val_accuracy',
-        min_delta=1e-3,
-        patience=5,
+        min_delta=2e-3,
+        patience=6,
         restore_best_weights=True
     )
 
@@ -236,10 +236,10 @@ with strategy.scope():
 model.fit(
     x=train_indices,
     y=train_labels,
-    batch_size=32,
+    batch_size=33,
     epochs=num_epochs,
     callbacks=[early_stopping],
-    verbose=2,
+    verbose=3,
 )
 #%%
 model.save('completed_model.h5')
