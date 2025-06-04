@@ -239,7 +239,7 @@ model.fit(
     batch_size=32,
     epochs=num_epochs,
     callbacks=[early_stopping],
-    verbose=3,
+    verbose=2,
 )
 #%%
 model.save('completed_model.h5')
