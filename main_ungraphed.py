@@ -236,7 +236,7 @@ with strategy.scope():
 model.fit(
     x=train_indices,
     y=train_labels,
-    batch_size=33,
+    batch_size=32,
     epochs=num_epochs,
     callbacks=[early_stopping],
     verbose=3,
