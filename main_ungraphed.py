@@ -168,8 +168,8 @@ feature_vectors = keras.utils.normalize(feature_vectors)
 
 #%%
 edge_list = []
-for cluister in cluster_knns.values():
-    for node, neighbors in cluster_knns.items():
+for cluster in cluster_knns.values():
+    for node, neighbors in cluster.items():
         for neighbor in neighbors:
             edge_list.append([node, neighbor])
 

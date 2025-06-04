@@ -193,7 +193,7 @@ class GraphAttentionNetwork(keras.Model):
     def test_step(self, data):
         indices, labels = data
         outputs = self([self.node_states, self.edges])
-        loss = self.compiled_loss(labels, tf.gather(outputs, indices))
+        loss = self.compiled_loss(x=None, y=labels, y_pred=tf.gather(outputs, indices), sample_weight=None)
 
         self.compiled_metrics.update_state(labels, tf.gather(outputs, indices))
 
